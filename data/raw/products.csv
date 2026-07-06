@@ -1,0 +1,6 @@
+product_id,product_name,category,unit_price
+P001,Laptop,Electronics,1200.0
+P002,Phone,Electronics,800.0
+P003,Desk,Furniture,350.0
+P004,Chair,Furniture,150.0
+P005,Notebook,Stationery,5.0
