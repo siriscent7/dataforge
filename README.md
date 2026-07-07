@@ -1,20 +1,22 @@
 # DataForge — Big-Data Processing & Cloud Warehouse Pipeline
 
-**DataForge** is an end-to-end data pipeline built with **Python** and **Apache Spark (PySpark)**. It ingests raw retail data, validates it through data-quality gates, models it into a **star-schema data warehouse**, and loads it **incrementally** with upsert semantics — with partition-based query optimization and an Airflow orchestration definition. It demonstrates the core patterns of production data engineering.
+**DataForge** is an end-to-end data pipeline built with **Python** and **Apache Spark (PySpark)**. It ingests raw retail data, validates it through data-quality gates, models it into a **star-schema data warehouse** with **SCD Type 2** history, and loads it **incrementally** with upsert semantics — with partition-based query optimization, data-quality metrics/alerting, and an Airflow orchestration definition. It demonstrates the core patterns of production data engineering.
 
 ## Motivation
 
-Analytical systems must turn raw, high-volume, messy data into query-optimized warehouse schemas reliably and repeatably. DataForge implements the full workflow — ingestion, distributed transformation, data-quality enforcement, dimensional modeling, incremental loading, and partition optimization — the way production pipelines do.
+Analytical systems must turn raw, high-volume, messy data into query-optimized warehouse schemas reliably and repeatably. DataForge implements the full workflow — ingestion, distributed transformation, data-quality enforcement, dimensional modeling with history, incremental loading, and partition optimization — the way production pipelines do.
 
 ## Key Features
 
 - **Distributed processing with PySpark** — runs locally in `local[*]` mode (simulated cluster) and scales to a real cluster unchanged.
 - **Data-quality validation** — null, range, and referential-integrity checks; bad rows are **quarantined** with a reject reason instead of failing the batch or corrupting analytics.
+- **Data-quality metrics + alerting** — per-batch rejection rate and per-reason breakdown, with a configurable quality gate that alerts when the rejection rate exceeds a threshold.
 - **Star-schema dimensional modeling** — a central `fact_sales` table with **surrogate foreign keys** to `dim_product`, `dim_customer`, and `dim_date`, plus computed measures (quantity, revenue).
+- **SCD Type 2 dimension history** — when a tracked attribute changes, the old dimension row is expired (with an expiry date) and a new current version is inserted, preserving point-in-time history.
 - **Incremental loading** — a **watermark** tracks the last processed record so each run only handles the delta; new fact rows are **upserted** (update-or-insert), making re-runs **idempotent**.
 - **Partition-based optimization** — the fact table is partitioned by year/month, enabling **partition pruning** (verified in the physical plan).
 - **Airflow orchestration** — the pipeline is defined as a scheduled, retrying, dependency-ordered DAG.
-- **Tested** — data-quality rules, dimensional modeling, and incremental upsert.
+- **Tested** — validation rules, dimensional modeling, incremental upsert, SCD Type 2, and quality metrics.
 
 ## Architecture
 
@@ -24,7 +26,8 @@ flowchart TD
     INGEST --> VALIDATE[Data-Quality Validation]
     VALIDATE -->|clean| MODEL[Star-Schema Modeling]
     VALIDATE -->|rejected| QUARANTINE[Quarantine table + reason]
-    MODEL --> DIMS[dim_product / dim_customer / dim_date]
+    VALIDATE --> METRICS[Quality Metrics + Alerting]
+    MODEL --> DIMS[dim_product / dim_customer / dim_date - SCD2]
     MODEL --> FACT[fact_sales - measures + surrogate keys]
     FACT --> LOAD[Incremental Upsert - watermark]
     LOAD --> WAREHOUSE[Partitioned Parquet Warehouse]
@@ -39,11 +42,24 @@ flowchart TD
     B --> C{New rows?}
     C -->|No| D[Up to date - exit]
     C -->|Yes| E[Validate: clean vs quarantine]
-    E --> F[Build star schema for the batch]
+    E --> M[Compute quality metrics + gate]
+    M --> F[Build star schema + apply SCD2]
     F --> G[Upsert into fact table - dedup by order_id]
     G --> H[Advance watermark to max order_id]
     H --> I[Partitioned write - year/month]
 ```
+
+## SCD Type 2 Example
+
+When customer C001 moves from Austin to Denver, history is preserved:
+
+```
+customer_key | customer_id | city   | effective_date | expiry_date | is_current
+1            | C001        | Austin | 2026-01-01     | 2026-06-01  | false
+2            | C001        | Denver | 2026-06-01     | (null)      | true
+```
+
+Historical fact rows still map to the Austin version; new rows map to Denver.
 
 ## Star Schema
 
@@ -62,9 +78,10 @@ flowchart TD
                   quantity,     -- measure
                   revenue)      -- measure
                      |
-              dim_customer
+              dim_customer (SCD2)
               (customer_key PK,
-               customer_id, city)
+               customer_id, city,
+               effective_date, expiry_date, is_current)
 ```
 
 ## Project Structure
@@ -76,14 +93,18 @@ dataforge/
 ├── requirements.txt
 ├── data/generate_data.py       # sample data generator (incl. bad rows)
 ├── ingestion/ingest.py         # CSV -> Spark DataFrames
-├── quality/validate.py         # data-quality rules + quarantine
-├── modeling/star_schema.py     # fact + dimension builders (surrogate keys)
+├── quality/
+│   ├── validate.py             # data-quality rules + quarantine
+│   └── metrics.py              # quality metrics + threshold alerting
+├── modeling/
+│   ├── star_schema.py          # fact + dimension builders (surrogate keys)
+│   └── scd.py                  # SCD Type 2 dimension history
 ├── load/
 │   ├── watermark.py            # incremental checkpoint
 │   └── incremental.py          # delta filter + upsert + partitioned write
 ├── etl/spark_session.py        # configured local SparkSession
 ├── dags/dataforge_dag.py       # Airflow orchestration DAG
-└── tests/                      # validation, modeling, incremental tests
+└── tests/                      # validation, modeling, incremental, SCD2, metrics
 ```
 
 ## Build & Run
@@ -112,7 +133,11 @@ python -m pytest tests/ -v       # run tests
 
 **Quarantine over hard failure** — Bad rows are diverted to an error table with a reason rather than failing the whole batch, so one malformed record never blocks a load or silently corrupts analytics.
 
+**Quality metrics + gate** — Each batch's rejection rate and per-reason breakdown are computed; exceeding a threshold raises an alert, catching upstream data problems before they reach the warehouse.
+
 **Star schema with surrogate keys** — Surrogate keys insulate the warehouse from source-system ID changes; the star layout makes analytical joins fast and BI-tool-friendly.
+
+**SCD Type 2 for dimension history** — Attribute changes create a new versioned row rather than overwriting, so historical facts always map to the correct point-in-time attributes. (For very large dimensions, a Delta Lake MERGE would replace the collect-based approach — see Roadmap.)
 
 **Incremental loading + idempotent upsert** — A watermark limits each run to the delta; upsert (union + dedup-by-latest keyed on `order_id`) makes re-runs idempotent and retries safe — the difference between minutes and hours at scale.
 
@@ -121,10 +146,8 @@ python -m pytest tests/ -v       # run tests
 **Parquet output** — A columnar on-disk format optimized for the read-heavy analytical queries a warehouse serves.
 
 ## Roadmap
-- Slowly Changing Dimensions (SCD Type 2) for dimension history
-- Delta Lake backend for native ACID MERGE + time travel
+- Delta Lake backend for native ACID MERGE + time travel (scales SCD2 to large dimensions)
 - Cloud warehouse target (Snowflake / BigQuery / Redshift)
-- Data-quality metrics + alerting
 - Streaming ingestion (Structured Streaming) alongside batch
 
 ## License
