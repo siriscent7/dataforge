@@ -1,0 +1,19 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Spark / local runtime
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Generated data + pipeline output (don't commit large/derived files)
+data/raw/
+data/output/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
