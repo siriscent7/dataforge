@@ -45,3 +45,15 @@ def upsert_fact(spark: SparkSession, new_fact: DataFrame, fact_path: str) -> Dat
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     return spark.read.parquet(fact_path)
+
+
+def write_partitioned(fact_with_date, out_path: str):
+    """
+    Write the fact table partitioned by year/month for partition pruning.
+    Expects the fact to include 'year' and 'month' columns.
+    """
+    (fact_with_date
+        .write
+        .mode("overwrite")
+        .partitionBy("year", "month")
+        .parquet(out_path))
